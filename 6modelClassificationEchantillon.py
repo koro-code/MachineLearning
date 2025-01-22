@@ -6,10 +6,11 @@ import numpy as np
 # Pour la division train/test
 from sklearn.model_selection import train_test_split, GridSearchCV
 
-# Pour le pipeline
+# Pour la pipeline (avec oversampling)
+from imblearn.pipeline import Pipeline
+from imblearn.over_sampling import RandomOverSampler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
 
 # Pour les métriques
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
@@ -67,8 +68,8 @@ def explode_annotators(row):
             'gender':              sex_i,
             'age_range':           age_i,
             'tweet_clean':         row['tweet_clean'],
-            'eval_annotator':      label_i,
-            'eval_type_annotator': type_i
+            'eval_annotator':      label_i,               # 0 ou 1
+            'eval_type_annotator': type_i                 # 'DIRECT','REPORTED','JUDGEMENTAL' ou '-'
         })
     return new_rows
 
@@ -93,7 +94,7 @@ df_exploded_test  = df_exploded[df_exploded['tweet_id'].isin(test_ids)].copy()
 
 # ----------------------------------------------
 # 4) Entraînement BINAIRE par annotateur
-#    (Sexiste vs Non sexiste)
+#    (Sexiste vs Non sexiste) - OVERSAMPLING
 # ----------------------------------------------
 param_grid_binary = {
     'tfidf__ngram_range': [(1,1), (1,2)],
@@ -107,16 +108,17 @@ for i in range(6):
     X_i_train = subset_train_i['tweet_clean']
     y_i_train = subset_train_i['eval_annotator']
     
+    # Important: on place le TfidfVectorizer AVANT le RandomOverSampler
     pipeline_i = Pipeline([
         ('tfidf', TfidfVectorizer(
             sublinear_tf=True,
             stop_words='english', 
             min_df=2
         )),
+        ('oversample', RandomOverSampler(random_state=42)),
         ('clf', LogisticRegression(
             max_iter=1000,
             solver='lbfgs',
-            class_weight='balanced', 
             random_state=42
         ))
     ])
@@ -135,10 +137,10 @@ for i in range(6):
 # ----------------------------------------------
 # 5) Entraînement MULTI-CLASSES par annotateur
 #    (DIRECT / REPORTED / JUDGEMENTAL)
-#    Uniquement sur tweets jugés sexistes par l'annotateur
+#    + OVERSAMPLING
 # ----------------------------------------------
 df_exploded_sexist = df_exploded[
-    (df_exploded['eval_annotator'] == 1) &
+    (df_exploded['eval_annotator'] == 1) & 
     (df_exploded['eval_type_annotator'] != '-')
 ].copy()
 
@@ -151,11 +153,12 @@ param_grid_multi = {
 }
 
 models_per_annotator_multi = {}
+type_classes = ['DIRECT','REPORTED','JUDGEMENTAL']
 
 for i in range(6):
     subset_train_i = df_exploded_sexist_train[df_exploded_sexist_train['annotator_index'] == i]
     if len(subset_train_i) < 5:
-        # Trop peu d'exemples pour entraîner
+        # Trop peu d'exemples => skip
         continue
     
     X_i_train = subset_train_i['tweet_clean']
@@ -163,7 +166,8 @@ for i in range(6):
     
     pipeline_i = Pipeline([
         ('tfidf', TfidfVectorizer()),
-        ('clf', LogisticRegression(max_iter=1000, solver='lbfgs'))
+        ('oversample', RandomOverSampler(random_state=42)),
+        ('clf', LogisticRegression(max_iter=1000, solver='lbfgs', random_state=42))
     ])
     
     gs = GridSearchCV(
@@ -181,12 +185,6 @@ for i in range(6):
 # 6) Prédiction finale agrégée (4 classes)
 #    "NON_SEXISTE" + "DIRECT" + "REPORTED" + "JUDGEMENTAL"
 # ----------------------------------------------
-type_classes = ['DIRECT','REPORTED','JUDGEMENTAL']
-
-# Pour chaque tweet du test, on calcule la moyenne
-# des probabilités "Sexiste" des 6 modèles binaires.
-# Si < 0.5 => "NON_SEXISTE",
-# sinon, on agrège les probabilités des 6 modèles multi-classes.
 df_test_only = df[df['tweet_id'].isin(test_ids)].copy()
 
 y_true_all = []
@@ -207,9 +205,9 @@ def majority_eval_type(evals_list, types_list):
 # On calcule le 'vrai' label agrégé (multi-classes + "NON_SEXISTE")
 df_test_only['true_type'] = '-'
 for idx in df_test_only.index:
-    evals  = ast.literal_eval(df_test_only.loc[idx, 'evaluation'])
-    types  = ast.literal_eval(df_test_only.loc[idx, 'evaluation_type'])
-    # Si la majorité des annotateurs vote "YES", on regarde la majorité du type
+    evals = ast.literal_eval(df_test_only.loc[idx, 'evaluation'])
+    types = ast.literal_eval(df_test_only.loc[idx, 'evaluation_type'])
+    
     nb_yes = sum(e == 'YES' for e in evals)
     nb_no  = sum(e == 'NO'  for e in evals)
     if nb_yes >= nb_no:
@@ -242,7 +240,7 @@ for tweet_id in df_test_only['tweet_id'].unique():
                 class_order = model_multi.classes_
                 p_multi = model_multi.predict_proba([tweet_text])[0]
                 
-                # On retrouve l'indice de chaque classe
+                # indices de classes
                 idx_direct       = list(class_order).index('DIRECT')
                 idx_reported     = list(class_order).index('REPORTED')
                 idx_judgemental  = list(class_order).index('JUDGEMENTAL')
@@ -253,7 +251,6 @@ for tweet_id in df_test_only['tweet_id'].unique():
                 nb_models += 1
         
         if nb_models == 0:
-            # Pas de modèle multi entraîné pour ce tweet => fallback
             pred_type = '-'
         else:
             avg_probas = sum_probas / nb_models
@@ -267,16 +264,13 @@ for tweet_id in df_test_only['tweet_id'].unique():
 # 7) Évaluation finale 4 classes
 #    (DIRECT / REPORTED / JUDGEMENTAL / NON_SEXISTE)
 # ----------------------------------------------
-# On ne conserve que les tweets où le "vrai" label est
-# l'une de ces 4 classes (et pas '-').
+all_labels = ['DIRECT','REPORTED','JUDGEMENTAL','NON_SEXISTE']
 final_true = []
 final_pred = []
-all_labels = ['DIRECT','REPORTED','JUDGEMENTAL','NON_SEXISTE']
 
 for t, p in zip(y_true_all, y_pred_all):
     if t in all_labels:
         final_true.append(t)
-        # Si jamais la prédiction est hors 4 classes, on la force à '-'
         final_pred.append(p if p in all_labels else '-')
 
 print("\n=== Évaluation finale agrégée (4 classes) ===")
