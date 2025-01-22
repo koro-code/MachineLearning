@@ -1,12 +1,12 @@
-import pandas as pd
-import re
-import ast
+import pandas as pd # pour manipuler les données sous forme de DataFrame.
+import re # pour les expressions régulières.
+import ast # pour convertir une chaîne de caractères en liste.
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer # pour la vectorisation des textes.
+from sklearn.linear_model import LogisticRegression # le model
+from sklearn.pipeline import Pipeline # pour créer un pipeline de traitement.
+from sklearn.model_selection import train_test_split # pour séparer les données en train/test.
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix # pour mesurer les performances du modèle (précision, rappel, f1-score, etc.).
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -45,6 +45,7 @@ df = df[['tweet',
 # ------------------------------
 # 4) NETTOYAGE DES TWEETS
 # ------------------------------
+# préparer le texte pour le traitement du langage (enlever URLs, mentions, caractères spéciaux)
 def clean_tweet(text):
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'@\w+', '', text)
@@ -53,6 +54,7 @@ def clean_tweet(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+# on crée une nouvelle colonne tweet_clean qui contient la version nettoyée du tweet.
 df['tweet_clean'] = df['tweet'].apply(clean_tweet)
 
 # ------------------------------
@@ -65,7 +67,7 @@ X_train, X_test, y_train, y_test, df_train, df_test = train_test_split(
     X,
     y,
     df,  # On split également le DataFrame complet 
-    test_size=0.2,
+    test_size=0.2, # 20% des données dans le set de test
     random_state=42,
     stratify=y
 )
@@ -76,28 +78,30 @@ X_train, X_test, y_train, y_test, df_train, df_test = train_test_split(
 # 6) PIPELINE
 # ------------------------------
 pipeline = Pipeline([
-    ('tfidf', TfidfVectorizer()),
-    ('clf', LogisticRegression(max_iter=1000))
+    ('tfidf', TfidfVectorizer()), # Le TF-IDF évalue l'importance d’un mot dans un document en tenant compte de sa fréquence dans le corpus.
+    ('clf', LogisticRegression(max_iter=1000)) # on crée un classifieur de type Régression Logistique
 ])
+
+# Ainsi, quand on fera .fit(X_train, y_train), il appliquera TfidfVectorizer sur X_train, puis entraînera la LogisticRegression sur le résultat
 
 # ------------------------------
 # 7) ENTRAINEMENT
 # ------------------------------
 print("Entraînement du modèle...")
-pipeline.fit(X_train, y_train)
+pipeline.fit(X_train, y_train) # On entraîne le modèle sur les données d'entraînement
 print("Entraînement terminé.")
 
 # ------------------------------
 # 8) PREDICTION SUR LE SET DE TEST
 # ------------------------------
 print("Prédiction sur les données de test...")
-y_pred = pipeline.predict(X_test)
+y_pred = pipeline.predict(X_test) # Le pipeline applique la même transformation TfidfVectorizer sur X_test (en utilisant le vocabulaire appris).
 
 # ------------------------------
 # 9) EVALUATION GLOBALE
 # ------------------------------
-acc = accuracy_score(y_test, y_pred)
-report = classification_report(y_test, y_pred, target_names=['Non Sexiste', 'Sexiste'])
+acc = accuracy_score(y_test, y_pred) # on calcule la proportion de prédictions correctes.
+report = classification_report(y_test, y_pred, target_names=['Non Sexiste', 'Sexiste']) # montre la précision (precision), rappel (recall), f1-score, et support (nombre d’exemples) pour chaque classe
 
 print(f"Accuracy globale: {acc:.4f}")
 print("Rapport de classification:\n", report)
@@ -113,99 +117,4 @@ sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
 plt.xlabel("Prédictions")
 plt.ylabel("Vérités")
 plt.title("Matrice de Confusion Globale (tweet entier)")
-plt.show()
-
-# =============================================================
-#         PARTIE SPECIFIQUE: MATRICES DE CONFUSION
-#         PAR ANNOTATEUR (en tenant compte de l'âge et du sexe)
-# =============================================================
-
-# ------------------------------
-# 11) AJOUTER LES PREDICTIONS AU DF DE TEST
-# ------------------------------
-df_test = df_test.copy()
-df_test['y_pred'] = y_pred  # la prédiction binaire (0/1) pour chaque tweet
-
-# ------------------------------
-# 12) PARSER LES COLONNES POUR AVOIR 1 LIGNE PAR ANNOTATEUR
-# ------------------------------
-df_test['gender_list'] = df_test['gender_annotators'].apply(ast.literal_eval)
-df_test['age_list']    = df_test['age_annotators'].apply(ast.literal_eval)
-df_test['eval_list']   = df_test['evaluation'].apply(ast.literal_eval)
-
-def explode_annotators(row):
-    new_rows = []
-    for i in range(len(row['gender_list'])):  # 6 en général
-        sex_i     = row['gender_list'][i]
-        age_i     = row['age_list'][i]
-        eval_i    = row['eval_list'][i]   # 'YES' ou 'NO'
-        y_pred_i  = row['y_pred']         # (0 ou 1) => pareil pour les 6
-
-        # Convertir 'YES'/'NO' en 1/0
-        real_label_i = 1 if eval_i == 'YES' else 0
-
-        new_rows.append({
-            'tweet_clean':    row['tweet_clean'],
-            'annotator_index': i,   # 0..5
-            'gender':         sex_i,
-            'age_range':      age_i,
-            'eval_annotator': real_label_i,
-            'pred_model':     y_pred_i
-        })
-    return new_rows
-
-all_rows = []
-for idx, row in df_test.iterrows():
-    exploded = explode_annotators(row)
-    all_rows.extend(exploded)
-
-df_test_exploded = pd.DataFrame(all_rows)
-
-# ------------------------------
-# 13) Évaluation par annotateur (accuracy & classification_report)
-# ------------------------------
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
-
-for i in range(6):
-    subset = df_test_exploded[df_test_exploded['annotator_index'] == i]
-    true_labels = subset['eval_annotator']  # liste de 0/1
-    pred_labels = subset['pred_model']      # liste de 0/1 (prédits par le modèle)
-
-    # Accuracy et rapport
-    acc_anno = accuracy_score(true_labels, pred_labels)
-    report_anno = classification_report(
-        true_labels, 
-        pred_labels, 
-        target_names=['Non Sexiste', 'Sexiste']
-    )
-
-    print(f"\n=== Annotateur {i+1} ===")
-    print(f"Accuracy: {acc_anno:.4f}")
-    print("Rapport de classification:\n", report_anno)
-
-    # On peut aussi afficher la matrice de confusion
-    cm_anno = confusion_matrix(true_labels, pred_labels)
-    plt.figure(figsize=(4,4))
-    sns.heatmap(cm_anno, annot=True, fmt='d', cmap='Reds',
-                xticklabels=['Non Sexiste','Sexiste'],
-                yticklabels=['Non Sexiste','Sexiste'])
-    plt.xlabel("Prédiction Modèle")
-    plt.ylabel("Label Annotateur")
-    plt.title(f"Matrice de Confusion - Annotateur {i+1}")
-    plt.show()
-
-# -----------------------------------------------------
-# 14) Optionnel : MATRICE DE CONFUSION (TOUS ANNOTATEURS)
-# -----------------------------------------------------
-all_true = df_test_exploded['eval_annotator']
-all_pred = df_test_exploded['pred_model']
-cm_all = confusion_matrix(all_true, all_pred)
-
-plt.figure(figsize=(5,4))
-sns.heatmap(cm_all, annot=True, fmt='d', cmap='Purples',
-            xticklabels=['Non Sexiste','Sexiste'],
-            yticklabels=['Non Sexiste','Sexiste'])
-plt.xlabel("Prédiction Modèle")
-plt.ylabel("Label Annotateur")
-plt.title("Matrice de Confusion - Tous Annotateurs Confondus")
 plt.show()
